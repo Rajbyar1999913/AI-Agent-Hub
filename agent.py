@@ -6,6 +6,8 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from memory import save_memory, search_memory
+
 load_dotenv()
 
 MODEL = os.getenv("AGENT_MODEL", "gpt-5.6-luna")
@@ -17,12 +19,24 @@ You are AI-Agent-Hub, a practical personal AI agent.
 Your job is to understand the user's goal, make a short plan, use available tools when useful,
 and report the result clearly. Do not claim that an action happened unless a tool actually completed it.
 
+Capabilities in V2:
+- You can use live web search when the user needs current or external information.
+- You can store and retrieve useful user-approved memories in local SQLite storage.
+- You can inspect and modify files inside the configured workspace, with approval required for writes.
+
+Memory rules:
+- Save information only when the user explicitly asks you to remember it, or when it is clearly a stable
+  preference/project fact and saving it is necessary to complete the current task.
+- Never save passwords, API keys, cookies, financial credentials, or other secrets.
+- When a memory is relevant, search memory before asking the user to repeat it.
+
 Safety rules:
 - Never ask for or expose API keys, passwords, cookies, or private tokens.
 - Reading files is allowed only inside the configured workspace.
 - Writing or modifying a file always requires explicit user approval in the terminal.
 - Do not execute shell commands, install software, send messages, submit applications, make purchases,
-or perform external account actions in V1.
+  or perform external account actions in V2.
+- Web search is for research; it does not authorize purchases, logins, submissions, or external actions.
 - When an action is outside the available tools, explain what is missing instead of pretending.
 """.strip()
 
@@ -39,7 +53,6 @@ def calculator(expression: str) -> str:
     allowed = set("0123456789+-*/(). %")
     if not expression or any(ch not in allowed for ch in expression):
         raise ValueError("Only basic arithmetic characters are allowed.")
-    # eval is restricted to an empty builtins dictionary and a character allow-list.
     result = eval(expression, {"__builtins__": {}}, {})
     return str(result)
 
@@ -50,7 +63,7 @@ def list_files(path: str = ".") -> str:
         raise ValueError("Not a directory.")
     items = []
     for item in sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
-        items.append((item.relative_to(WORKSPACE).as_posix() + ("/" if item.is_dir() else "")))
+        items.append(item.relative_to(WORKSPACE).as_posix() + ("/" if item.is_dir() else ""))
     return "\n".join(items[:200]) or "(empty directory)"
 
 
@@ -77,6 +90,7 @@ def write_file(path: str, content: str) -> str:
 
 
 TOOLS = [
+    {"type": "web_search"},
     {
         "type": "function",
         "name": "calculator",
@@ -131,6 +145,36 @@ TOOLS = [
         },
         "strict": True,
     },
+    {
+        "type": "function",
+        "name": "save_memory",
+        "description": "Save a non-sensitive user-approved preference or project fact to local memory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["category", "content"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
+    {
+        "type": "function",
+        "name": "search_memory",
+        "description": "Search the agent's local memory for relevant saved facts.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            "required": ["query", "limit"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    },
 ]
 
 
@@ -139,6 +183,8 @@ FUNCTIONS = {
     "list_files": list_files,
     "read_file": read_file,
     "write_file": write_file,
+    "save_memory": save_memory,
+    "search_memory": search_memory,
 }
 
 
@@ -186,9 +232,10 @@ def main() -> None:
         raise SystemExit("OPENAI_API_KEY is missing. Copy .env.example to .env and add your API key.")
 
     client = OpenAI()
-    print("\nAI-Agent-Hub V1 is ready.")
+    print("\nAI-Agent-Hub V2 is ready.")
     print(f"Model: {MODEL}")
     print(f"Workspace: {WORKSPACE}")
+    print("Web search: ON | Local memory: ON | File-write approval: ON")
     print("Type 'exit' to stop.\n")
 
     while True:
